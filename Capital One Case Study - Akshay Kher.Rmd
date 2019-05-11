@@ -1,0 +1,942 @@
+---
+title: "Analyzing Profitability on Short Term Rentals using AirbnB and Zillow Data"
+author: "Akshay Kher"
+date: "May 2, 2019"
+output: html_document
+---
+
+# {.tabset .tabset-fade}
+
+## Introduction
+
+#### 1. <span style="color:blue">Question</span>
+Help a real-estate agency understand the zip codes that would generate most profit on short term rentals within New York City.
+
+#### 2. <span style="color:blue">Data</span>
+The analysis will make use of:
+
+1. **Zillow Data** - Provides the price for two-bedroom properties in NYC
+2. **Airbnb Data** - Provides the rent charged for properties in NYC
+
+#### 3. <span style="color:blue">Initial Assumptions</span>
+1. The investor will pay for the property in cash (i.e. no mortgage/interest rate will need to be accounted for).
+2. The time value of money discount rate is 0% (i.e. $1 today is worth the same 100 years from now).
+3. All properties and all square feet within each locale can be assumed to be homogeneous (i.e. a 1000 square foot property in a locale such as Bronx or Manhattan generates twice the revenue and costs twice as much as any other 500 square foot property within that same locale.)
+
+
+## Setup
+
+### Libraries Required
+```{r warning=FALSE, message=FALSE}
+require(Rmisc)
+require(data.table)
+require(DT)
+require(tidyverse)
+require(stringr)
+require(car)
+require(kableExtra)
+require(ggplot2)
+require(plotly)
+require(R.utils)
+```
+
+
+### Setup Variables
+```{r warnings=FALSE, message=FALSE}
+# name of  zillow data file
+name_zillow_file <- 'Zip_Zhvi_2bedroom'
+
+# name of airbnb data file
+name_airbnb_file <- 'listings' 
+```
+
+### Reading data 
+
+```{r warnings=FALSE, message=FALSE}
+house_price <- 
+  fread(paste0(name_zillow_file, '.csv')) # reading zillow data
+
+house_rent <- 
+  fread(paste0(name_airbnb_file, '.csv.gz')) # reading airbnb data
+```
+
+## Global Variables
+
+**All code related changes should me made in this section only.**
+
+***
+
+Global variables for house buying price data - Zillow
+```{r}
+# first date variable in house price data
+datetime_start_filter <- "1996-04" 
+
+# last date variable in house price data
+datetime_end_filter <- "2017-06"
+
+# city filter
+city_filter <- 'New York' 
+
+# first variable in a sequence of factor variables
+factor_start_filter <- 'City'
+
+# last variable in a sequence of factor variables
+factor_end_filter <- 'CountyName'
+```
+
+***
+
+Global variables for house rent price data - Airbnb
+```{r}
+# subset of variables to be analyzed in house rent data
+revenue_vars_filter <- c('zipcode','id', 'last_scraped', 'neighbourhood_group_cleansed',
+                         'property_type', 'room_type', 'accommodates', 'bathrooms',
+                         'bedrooms', 'beds', 'bed_type', 'square_feet',
+                         'security_deposit', 'price', 'cleaning_fee',
+                         'guests_included', 'extra_people')
+
+# ASSUMPTION - properties with price greater than $2000 per night (0.01% observations) are removed
+price_filter <- 2000
+
+# ASSUMPTION - minimum square feet filter
+min_square_feet_filter <- 80 
+
+# ASSUMPTION - maximum square feet filter
+max_square_feet_filter <- 10000
+
+# set of numeric columns
+numeric_cols_filter <- c('year', 'month', 'day', 'zipcode') 
+
+# set of factor columns
+factor_cols_filter <- c('neighbourhood_group_cleansed', 'property_type' ,'room_type') 
+
+# Function to convert price columns to numeric
+# Steps:
+# 1. store indexes of price columns
+# 2. remove the '$' character
+# 3. substitute ',' with blank
+# 4. convert to numeric
+convert_price_to_numeric <- function(data, var)
+{
+  index <- which(colnames(data) == var) # indexes of price columns
+  df1 <- str_sub(data[,index], 2) # remove '$' character
+  df2 <- gsub(",","",df1) %>% # substitute ',' with blank
+    as.numeric() # convert to numeric
+  return(df2)
+}
+
+# number of bedrooms filter
+filter_bedrooms_filter <- 2 
+
+# ASSUMPTION - years to filter on to calculate the year-on-year price increase
+year_filter_subset <- c(2014, 2015, 2016, 2017)
+
+# ASSUMPTION - occupancy rate of house every year
+occupancy_rate <- 0.75 
+
+# ASSUMPTION - percentage of stays during which extra people will stay
+frequency_extra_people_filter <- 1/5
+```
+
+## Preparing Data {.tabset .tabset-fade .tabset-pills}
+
+### Preparing Zillow Data
+
+**Key Data Quality Steps**
+
+1. Date columns have been unpivoted
+2. Data types of variables are appropriately converted
+
+***
+
+**Creating a function to prepare the Zillow Data where:**
+
+1. The dataset is tidy:
+    * Each variable has its own column
+    * Each observation has its own row
+    * Each value has its own cell
+2. City filter is applied
+3. Date columns have been unpivoted
+4. RegionName is renamed to zipcode
+5. Data types of variables are appropriately converted
+
+```{r}
+prepare_zillow_data <- function(house_price,
+                                datetime_start=datetime_start_filter,
+                                datetime_end=datetime_end_filter,
+                                city=city_filter,
+                                factor_start=factor_start_filter,
+                                factor_end=factor_end_filter)
+{
+  
+  ######### Wrangling Zillow Data ######### 
+  # Steps:
+  # 1. Select first and last index of date variables
+  # 2. Read house price data
+  # 3. Filter by city
+  # 4. Unpivot date columns
+  # 5. Rename RegionName to zipcode
+  
+    index_datetime_start <- 
+    which(colnames(house_price) == datetime_start) # index of first date variable
+  
+    index_datetime_end <- 
+      which(colnames(house_price) == datetime_end) # index of last date variable
+    
+    house_price_filtered <-
+      house_price %>% # read house price data
+      filter(City %in% city) %>%  # filter by city
+      gather(Datetime, Median_price, index_datetime_start:index_datetime_end) %>%  # unpivot date columns
+      separate(Datetime, c("year", "month")) %>%  # separate date into year and month
+      rename(zipcode=RegionName) # rename RegionName to zipcode
+    
+  ######### Changing data types of variables #########
+    index_factor_start <- 
+      which(colnames(house_price_filtered) == factor_start) # index of first factor variable
+    
+    index_factor_end <- 
+      which(colnames(house_price_filtered) == factor_end) # index of last factor variable
+    
+    house_price_filtered[,index_factor_start:index_factor_end] <- 
+      map(house_price_filtered[,index_factor_start:index_factor_end]
+          , as.factor) # converting above set of variables to factor variables
+    
+    house_price_filtered$year <- 
+      as.numeric(house_price_filtered$year) # converting year to numeric
+    
+    house_price_filtered$month <- 
+      as.numeric(house_price_filtered$month) # converting month to numeric
+    
+  ######### return final data #########
+    return(house_price_filtered)
+}
+
+```
+
+***
+
+**Using the above function to prepare Zillow Data**
+```{r}
+house_price_filtered <- prepare_zillow_data(house_price)
+```
+
+***
+
+**Zillow Data Dictionary**
+
+```{r zillow, echo = FALSE, message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(house_price_filtered),
+  Description = c(
+    "Zillow assigned number only, assigned consecutively when the regions are defined",
+    "Zip code of where the property is located", 
+    "City of where the property is located",
+    "State of where the property is located",
+    "General name of the surrounding area where the property is located",
+    "Political and administrative division of a state, referred to as a particular part of the state",
+    "Population of the area; the lower the number the greater the population",
+    "Year when data was pulled",
+    "Month when data was pulled",
+    "Median Price within that area"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+
+***
+
+**Zillow Data**
+
+```{r}
+# display first 1000 rows
+kable(head(house_price_filtered, 1000)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+
+### Preparing Airbnb Data
+
+
+**Key Assumptions**
+
+* Properties with price greater than $2000 per night (0.01% observations) are removed
+* Properties with square feet area less than 80 or greater than 10000 are removed
+* Occupancy rate of a property each year is 75%
+* 20% of the stays will have an extra guest
+
+**Key Data Quality Steps**
+
+1. Removed observations outside the satisfactory square feet range.
+2. Filtered dataset for a subset of variables
+3. Segregated last_scraped variable into year, month and day
+4. Created and applied a function to clean *price* related variables
+5. Data types of variables are appropriately converted
+
+**Creating a function to prepare the Airbnb Data where:**
+
+1. The dataset is tidy:
+    * Each variable has its own column
+    * Each observation has its own row
+    * Each value has its own cell
+2. Square feet filter is applied
+3. Subset of variables filter is applied
+4. Data types of variables are appropriately converted
+
+```{r message=FALSE, warning=FALSE}
+
+prepare_airbnb_data <- function(house_rent,
+                                revenue_vars=revenue_vars_filter,
+                                price_max=price_filter,
+                                min_square_feet=min_square_feet_filter,
+                                max_square_feet=max_square_feet_filter,
+                                numeric_cols=numeric_cols_filter,
+                                factor_cols=factor_cols_filter,
+                                filter_bedrooms=filter_bedrooms_filter,
+                                year_filter=year_filter_subset,
+                                occupancy_rate=occupancy_rate_filter,
+                                frequency_extra_people=frequency_extra_people_filter)
+{
+  ######### Wrangling Airbnb Data ######### 
+  # Steps:
+  # 1. Read house rent data
+  # 2. Filter by square feet
+  # 3. Filter for subset of variables
+  # 4. Separate last_scraped into year, month and day
+    house_rent <-
+      house_rent %>% # read house rent data
+      filter(is.na(square_feet) | square_feet >=min_square_feet, 
+             is.na(square_feet) | square_feet <= max_square_feet,  # filter by square feet
+             price <= price_max) %>% # filter by price per night
+      .[, colnames(.) %in% revenue_vars] %>% # filter by subset of variables
+      separate(last_scraped, c('year', 'month', 'day')) # separate last_scraped variable
+  
+  ######### Changing data types of variables #########
+    index_numeric_cols <- 
+      colnames(house_rent) %in% numeric_cols # index of numerical columns
+    
+    index_factor_cols <- 
+      colnames(house_rent) %in% factor_cols # index of factor columns
+    
+    house_rent[,index_numeric_cols] <- 
+      map(house_rent[,index_numeric_cols], as.numeric) # convert to numeric
+    
+    house_rent[,index_factor_cols] <- 
+      map(house_rent[,index_factor_cols], as.factor) # convert to factor
+    
+    # Applying function to convert each price column to numeric
+    house_rent$price <- convert_price_to_numeric(house_rent,'price')
+    house_rent$security_deposit <- convert_price_to_numeric(house_rent, 'security_deposit')
+    house_rent$cleaning_fee <- convert_price_to_numeric(house_rent, 'cleaning_fee')
+    house_rent$extra_people <- convert_price_to_numeric(house_rent, 'extra_people')
+  
+ ######### return final data #########  
+  return(house_rent)
+}
+
+```
+
+***
+
+**Using the above function to prepare Airbnb Data**
+```{r message=FALSE, warning=FALSE}
+house_rent <- prepare_airbnb_data(house_rent)
+```
+
+***
+
+**Airbnb Data Dictionary**
+
+```{r airbnb, echo = FALSE, message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(house_rent),
+  Description = c(
+    "Identifier used by AirBnB for the listing",
+    "Year when data was pulled", 
+    "Month when data was pulled",
+    "Day when data was pulled",
+    "Name of the area where the property is located",
+    "zipcode",
+    "Indicates the type of house is this is considered.  Examples are house, apartment, townhomes, etc.",
+    "Indicates specific rooms available for rent and/or the entire home",
+    "Indicates the amount of people the host is allowing to occupy the property",
+    "Indicates the number of bathrooms within the property",
+    "Indicates the number of bedrooms within the property",
+    "Indicates the number of beds within the property for use",
+    "Indicates the type of bed the property has.  ie. futon, real bed, airbed, etc",
+    "Square footage of the property or space for rent",
+    "Price the host is charging to stay per night",
+    "Amount the host would like upfront for any incidentals (should you damage anything during your stay)",
+    "Price the host is charging to clean up after your stay",
+    "Indicates the number of guests the host is allowing you to bring along",
+    "Additional charge per additional guests you bring"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**Airbnb Data**
+
+```{r}
+# display first 1000 rows
+kable(head(house_rent, 1000)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+## Model {.tabset .tabset-fade .tabset-pills}
+
+### Model Building
+
+* **Aim**: Predict the missing square feet of houses
+
+* **Statistial Technique**: Linear Regression
+
+* **Variable Selection Method**: Stepwise AIC
+
+* **Final Variables Selected**:
+    * bathrooms
+    * price
+    * property_type
+    * accommodates
+    * bedrooms
+    
+* **Model Adjusted R Square**: 44.53%
+
+***
+
+**Building the model**
+```{r results=FALSE}
+# Drop rows with specific columns as NAs to avoid error in model building
+model_data <- drop_na(house_rent, square_feet, bathrooms, bedrooms) 
+
+# Null Model - Regress square feet on only the intercept
+nullmodel=lm(square_feet~1, data=model_data)
+
+# Full Model - Regress square feet on all predictor variables
+fullmodel=lm(square_feet~  property_type + room_type + accommodates + 
+               bedrooms + bathrooms + beds + price + guests_included + 
+               extra_people, data=model_data)
+
+# Final Model built using stepwise variable selection
+model_pred_sq_ft <- step(nullmodel, scope=list(lower=nullmodel, upper=fullmodel),
+                         direction='both')
+```
+
+***
+
+**Pairwise Plots**
+
+```{r}
+# square_feet vs bathrooms
+p1 <- ggplot(model_data, aes(x=bathrooms, y=square_feet)) +
+  geom_point(colour = "orange", size = 1.5) +
+  geom_smooth(method='lm', color='red') +
+  ylab("square feet")
+
+# square_feet vs price
+p2 <- ggplot(model_data, aes(x=price, y=square_feet)) +
+  geom_point(colour = "orange", size = 1.5) +
+  geom_smooth(method='lm', color='red') +
+  ylab("square feet")
+# square_feet vs accommodates
+p3 <- ggplot(model_data, aes(x=accommodates, y=square_feet)) +
+  geom_point(colour = "orange", size = 1.5) +
+  geom_smooth(method='lm', color='red') +
+  ylab("square feet")
+
+# square_feet vs bedrooms
+p4 <- ggplot(model_data, aes(x=bedrooms, y=square_feet)) +
+  geom_point(colour = "orange", size = 1.5) +
+  geom_smooth(method='lm', color='red') +
+  ylab("square feet")
+
+# combining all plots
+multiplot(p1, p2, p3, p4, cols=2)
+```
+
+***
+
+**Model Summary**
+```{r}
+summary(model_pred_sq_ft)
+```
+
+### Model Diagonostics
+
+1. **Errors are normally distributed with mean=0**
+
+Using a Q-Q Plot, errors are slightly right skewed. As a future step, we will need to diagnose this problem through transforming variables or using a non-linear predictive model.
+
+```{r}
+# Constructing a dataframe containing model attributes
+model_attributes1 <-
+data.frame(index=1:nrow(model_data),
+           residuals = model_pred_sq_ft$residuals, 
+           fitted_values = model_pred_sq_ft$fitted.values)
+
+# Constructing Q-Q Plot
+qqnorm(model_attributes1$residuals)
+qqline(model_attributes1$residuals, col='red')
+```
+
+***
+
+2. **Uncorrelated Errors **
+
+There seems to be no pattern for the errors over time (index). Thus we can safely assume that the errors are uncorrelated.
+
+```{r}
+# Plotting Residuals over Time
+model_attributes1 %>%
+  ggplot(aes(x=index,y=residuals)) +
+  geom_point()
+```
+
+***
+
+3. **Constance Variance**
+
+We can see that the residuals have fan-shaped variance across the fitted values. As a future step, we will need to diagnose this problem through transforming variables or using a non-linear predictive model.
+
+```{r}
+# Residuals vs Fitted-Value Plot
+ggplot(model_attributes1, aes(x=fitted_values,y=residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_hline(yintercept = 3, color = "blue") +
+  geom_hline(yintercept = -3, color = "blue")
+```
+
+***
+
+4. **Predictor Variables are independent of each other**
+
+As the **Variation Inflation Factor** < 5 for each predictor variable, we can assume that there is no multi-collinearity.
+
+```{r}
+vif(model_pred_sq_ft)
+```
+
+***
+
+5. **No influential outliers**
+
+Almost all **standardized errors** are below the absolute value of 4. However, we do have a few standardized errors greater than 4. As a future step, will need to check if it makes sense to remove these observations.
+
+```{r}
+# Plotting Studentized/Standardized Errors
+rstan <- rstandard(model_pred_sq_ft)  
+plot(rstan)
+```
+
+## Combining Data
+
+**Creating a function to combine Zillow and Airbnb data: **
+
+1. Both Zillow and Airbnb datasets are filtered to have the same zipcodes
+2. **Assumption**: Missing values of bathrooms are filled using the median value
+3. **Assumption**: Missing values of square feet are filled using the model built previously
+4. **Assumption**: Price per square foot of a property is assumed to be the ratio of median house price and median square feet for a specific neighbourhood
+5. **Assumption**: Estimated house Price is assumed to be the product of square feet and price per square foot
+6. **Assumption**: Increase in rent and house prices each year are assumed to be equivalent. Further, the year-on-year rent increase post 2017 is calculated as the average house price increase in the last 3 years.
+7. **Assumption**: Price per night (2017) of each property is calculated as the sum of:
+    * price charged per night
+    * price charged for extra people; where we are assuming that extra people will come in 1 out of 5 bookings
+8. **Assumption**: Investor is buying the properties in the year 2017.
+    
+```{r}
+
+combine_data <- function(house_price_data, house_rent_data)
+{
+  # filter the house rent data using the zipcodes in the house price data
+  house_rent_filtered <- 
+    filter(house_rent_data, zipcode %in% house_price_data$zipcode
+           , bedrooms==filter_bedrooms_filter)
+  
+  # calculating median bathrooms. 5 NA values for bathrooms will be filled using this
+  median_bathrooms <- 
+    median(house_rent_filtered$bathrooms, na.rm=TRUE)
+  
+  # filling missing bathroom values by median value
+  house_rent_filtered$bathrooms <- 
+    ifelse(is.na(house_rent_filtered$bathrooms), median_bathrooms,
+           house_rent_filtered$bathrooms)
+  
+  # applying model to predict square feet of each property
+  house_rent_filtered$predicted_square_ft <- 
+    predict(model_pred_sq_ft, newdata = house_rent_filtered)
+  
+  # filling the missing square feet values by predicted square feet values
+  house_rent_filtered$square_feet <- 
+    ifelse(is.na(house_rent_filtered$square_feet), 
+                  house_rent_filtered$predicted_square_ft, 
+                    house_rent_filtered$square)
+  
+  # remove predicted_square_ft column
+  house_rent_filtered$predicted_square_ft <- NULL 
+  
+  # calculate median house rent by neighbourhood
+  median_house_rent_filtered <-
+    house_rent_filtered %>% 
+    group_by(neighbourhood_group_cleansed) %>% 
+    summarize(median_square_feet = median(square_feet, na.rm=TRUE))
+  
+ ######### combining house rent and house buy data ######### 
+ # Steps:
+ # 1. add neighbourhood to house price data 
+ # 2. calculate median house price by neighbourhood
+ # 3. add median house price by neighbourhood to house rent data
+ # 4. add median square feet by neighbourhood to house rent data
+ # 5. calculate price per square feet
+ # 6. calculate buying price of a house as square_feet*price_per_sq_ft
+   
+  house_rent_and_buy_price <-
+    
+    # adding neighbourhood to house price data
+    inner_join(x = house_price_data,
+               y = unique(house_rent_filtered[,c('zipcode', 'neighbourhood_group_cleansed')]),
+               by='zipcode') %>% 
+    group_by(neighbourhood_group_cleansed, year, month) %>% 
+    
+    # calculating median house price by neighbourhood
+    summarize(median_price = median(Median_price, na.rm=TRUE)) %>% 
+    
+    # adding median house price by neighbourhood to house rent data
+    left_join(x = house_rent_filtered,
+              y = .,
+              by = c('neighbourhood_group_cleansed','year','month')) %>% 
+    
+    # adding median square feet by neighbourhood to house rent data
+    left_join(median_house_rent_filtered, by='neighbourhood_group_cleansed')
+  
+  # remove Median_price column
+  house_rent_and_buy_price$Median_price <- NULL
+  
+  # calculating price per square feet
+  house_rent_and_buy_price$price_per_sq_ft <- 
+    house_rent_and_buy_price$median_price/house_rent_and_buy_price$median_square_feet
+  
+  # calculating buying price of a house
+  house_rent_and_buy_price$house_buying_price <- 
+    house_rent_and_buy_price$price_per_sq_ft * house_rent_and_buy_price$square_feet
+  
+ ######### price per night (2017) for each property ######### 
+  
+  # calculating percentage increase in house price each year post 2014
+  perc_inc_house_price_by_year <- 
+    house_price_data %>% 
+      group_by(year) %>% 
+      summarise(mean_price = mean(Median_price, na.rm = TRUE)) %>% 
+      filter(year %in% year_filter_subset) %>% 
+      mutate(perc_inc = (mean_price - lag(mean_price))/lag(mean_price))
+  
+  # averaging year on year house price increase (global)
+  approx_perc_inc_rent_price_per_year <<- 
+    mean(perc_inc_house_price_by_year$perc_inc, na.rm=TRUE)
+  
+  # total price per night for each house in the year 2017 
+  house_rent_and_buy_price$price_per_night_2017 <- 
+    house_rent_and_buy_price$price + frequency_extra_people_filter*house_rent_and_buy_price$extra_people
+  
+  return(house_rent_and_buy_price)
+  }
+```
+  
+***
+
+**Using the above function to prepare Combined Data**
+
+```{r}
+house_rent_and_buy_price <- combine_data(house_price_filtered, house_rent)
+```
+
+***
+
+**Combined Data Dictionary**
+
+```{r combined, echo = FALSE, message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(house_rent_and_buy_price),
+  Description = c(
+    "Identifier used by AirBnB for the listing",
+    "Year when data was pulled", 
+    "Month when data was pulled",
+    "Day when data was pulled",
+    "Name of the area where the property is located",
+    "zipcode",
+    "Indicates the type of house is this is considered.  Examples are house, apartment, townhomes, etc.",
+    "Indicates specific rooms available for rent and/or the entire home",
+    "Indicates the amount of people the host is allowing to occupy the property",
+    "Indicates the number of bathrooms within the property",
+    "Indicates the number of bedrooms within the property",
+    "Indicates the number of beds within the property for use",
+    "Indicates the type of bed the property has.  ie. futon, real bed, airbed, etc",
+    "Square footage of the property or space for rent",
+    "Price the host is charging to stay per night",
+    "Amount the host would like upfront for any incidentals (should you damage anything during your stay)",
+    "Price the host is charging to clean up after your stay",
+    "Indicates the number of guests the host is allowing you to bring along",
+    "Additional charge per additional guests you bring",
+    "Median house price of the neighbourhood to which the property belongs",
+    "Median square foot of the neighbourhood to which the property belongs",
+    "Price per square foot",
+    "Estimated buying price of the property",
+    "Estimated rent charged per night in the year 2017"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**Combined Data**
+```{r}
+# display first 1000 rows
+kable(house_rent_and_buy_price) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+## Break-even Time
+
+**The following code calculates the break-even time for each property in years. Break-even time is defined as the number of years it takes to recover the invested money (i.e. money invested to buy the property): **
+
+```{r}
+
+# Steps:
+# 1. Run a for loop for each property in the data set
+# 2. In each loop:
+    # Initalize year = 0. This is the total years needed to breakeven
+    # Initalize tot_revenue = 0. This is the cumulative revenue generated through rent
+    # rent_price = rent price of the current property for the current year (2017)
+    # buy_price = buying price of the current property
+  # 3. Run a while loop inside the for loop: Till the buy_price > tot_revenue:
+      # increase year by 1
+      # increase yearly rent by approx 5.7% (calculated earlier as approx_perc_inc_rent_price_per_year )
+      # update tot_revenue: add this yrs revenue to the revenue generated through prev yrs
+  # 4. stop when buy_price < tot_revenue:
+      # decrease the year by 1 as break-even point has reached before the end of this year
+      # calculate revenue needed current year to break-even
+      # total time needed to break-even in this year = revenue_req_this_year/yearly rent this year
+      # total breakeven time = total time needed this year + previous years
+  # 5. Store the breakeven time for the current property in 'breakeven_time' vector
+
+breakeven_time <- c()
+
+for(i in 1:nrow(house_rent_and_buy_price))
+{
+  year <- 0 # initialize year to 0
+  tot_revenue <- 0 # initialize revenue to 0
+  rent_price <- 
+    house_rent_and_buy_price$price_per_night_2017[i] # rent price of property
+  buy_price <- 
+    house_rent_and_buy_price$house_buying_price[i] # buy price of property
+  
+  # while cost of buying the house is greater than the total revenue generated through rent
+  while(buy_price>tot_revenue)
+  {
+    # increase year by 1
+    year <- year + 1 
+    
+    # increase rent price for next year by a fixed percentage
+    rent_price <- rent_price * (1+approx_perc_inc_rent_price_per_year) 
+    
+    # calculating revenue till the current year
+    tot_revenue <- tot_revenue + rent_price*365*occupancy_rate
+  }
+  
+  # when the total revenue generated through rent is greater than cost of buying the house 
+  
+  # decrease the year by 1 as break-even point has reached before the end of this year
+  breakeven_year <- year - 1 
+  
+  # total revenue needed this year to break-even
+  revenue_req_this_year <- tot_revenue - buy_price
+  
+  # total time needed to break-even in this year
+  breakeven_year_additional <- revenue_req_this_year/(rent_price*365*occupancy_rate)
+  
+  # total breakeven time is summation of previous years + time taken in the current year
+  breakeven <- breakeven_year + breakeven_year_additional
+  
+  # storing breakeven time for each property
+  breakeven_time[i] <- breakeven
+}
+
+# adding breakeven_time variable to the dataset
+house_rent_and_buy_price$breakeven_time <- breakeven_time
+```
+
+**Data Dictionary**
+
+```{r breakeven, echo = FALSE, message = FALSE, warning = FALSE}
+text_tbl <- data.frame (
+  Variable = names(house_rent_and_buy_price),
+  Description = c(
+    "Identifier used by AirBnB for the listing",
+    "Year when data was pulled", 
+    "Month when data was pulled",
+    "Day when data was pulled",
+    "Name of the area where the property is located",
+    "zipcode",
+    "Indicates the type of house is this is considered.  Examples are house, apartment, townhomes, etc.",
+    "Indicates specific rooms available for rent and/or the entire home",
+    "Indicates the amount of people the host is allowing to occupy the property",
+    "Indicates the number of bathrooms within the property",
+    "Indicates the number of bedrooms within the property",
+    "Indicates the number of beds within the property for use",
+    "Indicates the type of bed the property has.  ie. futon, real bed, airbed, etc",
+    "Square footage of the property or space for rent",
+    "Price the host is charging to stay per night",
+    "Amount the host would like upfront for any incidentals (should you damage anything during your stay)",
+    "Price the host is charging to clean up after your stay",
+    "Indicates the number of guests the host is allowing you to bring along",
+    "Additional charge per additional guests you bring",
+    "Median house price of the neighbourhood to which the property belongs",
+    "Median square foot of the neighbourhood to which the property belongs",
+    "Price per square foot",
+    "Estimated buying price of the property",
+    "Estimated rent charged per night in the year 2017",
+    "Time needed (in years) to recover the cost of buying the property"
+  )
+)
+
+kable(text_tbl) %>%
+  kable_styling(full_width = F) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  column_spec(2, width = "30em")
+```
+
+***
+
+**Final Data**
+```{r}
+kable(house_rent_and_buy_price) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+## Insights
+
+**Analyzing Cost vs Revenue by Neighbourhood**
+
+* **House Price**
+    * The cost of buying a house at *Manhattan > Brooklyn > Queens > Staten Island*
+    * Manhattan and Brooklyn have **clear separation** in house prices from other neighbourhoods
+    * Queens and Staten Island seem to have **similar house prices**
+* **Rent Per Night**
+    * The rent per night at *Manhattan > Brooklyn > Queens > Staten Island*
+    * Manhattan has **reasonable separation** in rent per night from other neighbourhoods. However, the separation is not as profound as in the case of house prices.
+    * Brooklyn, Queens and Staten Island seem to have **similar rent per night**
+    
+*Conclusion*:\
+**A property with high price does not guarantee a high revenue.**\
+**Eg**: Brooklyn's property prices are clearly higher than Queens and Staten Island however the rent prices are not proportionally higher. 
+
+Hence we need a more thorough examination of the time it will take to recover the invested money.
+
+```{r warning=FALSE, message=FALSE}
+options(scipen = '999')
+p5 <- ggplot(house_rent_and_buy_price, 
+        aes(x=eval(parse(text='house_buying_price')), 
+        fill=eval(parse(text='neighbourhood_group_cleansed')))) +
+  geom_histogram(alpha=0.7, position="identity", aes(y = ..density..), color="black") +
+  geom_density(alpha=0.7) +
+  geom_vline(aes(xintercept=mean(eval(parse(text='house_buying_price'))))
+             , color="black", linetype="dashed", size=1) +
+  labs(x='House Price', y = "Density") +
+  guides(fill=guide_legend(title='Neighbourhood')) + 
+  scale_x_continuous(limits = c(0, 6000000))
+
+p6 <- ggplot(house_rent_and_buy_price, 
+       aes(x=eval(parse(text='price')), 
+           fill=eval(parse(text='neighbourhood_group_cleansed')))) +
+  geom_histogram(alpha=0.7, position="identity", aes(y = ..density..), color="black") +
+  geom_density(alpha=0.7) +
+  geom_vline(aes(xintercept=mean(eval(parse(text='price'))))
+             , color="black", linetype="dashed", size=1) +
+  labs(x='Price Per Night', y = "Density") +
+  scale_x_continuous(limits = c(0, 1000)) +
+  guides(fill=guide_legend(title='Neighbourhood'))
+
+multiplot(p5, p6)
+```
+
+***
+
+**Analyzing breakeven time and total properties listed by zipcode**
+
+* The breakeven time for *Manhattan > Brooklyn > Queens > Staten Island*
+* However, **all zipcodes in Staten Island, except for zipcode *10305*, have 2 or lower properties.** Hence we cannot recommend such zipcodes as they might not represent the true population.
+* Zipcodes in Manhattan, Brooklyn and Staten Island have at least 6 properties listed. Hence, we can be more sure of our inference.
+
+```{r warning=FALSE, message=FALSE}
+p7 <- ggplot(house_rent_and_buy_price, aes(x = as.factor(zipcode), y = breakeven_time, fill = neighbourhood_group_cleansed)) + 
+  geom_boxplot() +
+  labs(x = "Zipcode", y = "Breakeven time") + 
+  scale_y_continuous(breaks=seq(0, 40, 5)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  guides(fill = guide_legend(title = "Neighbourhood")) +
+  labs(fill='Neighbourhood', y='Breakeven Time (years)') 
+
+p8 <-
+  ggplot(house_rent_and_buy_price, aes(x=as.factor(zipcode))) +
+  geom_histogram(stat = "count", aes(fill = neighbourhood_group_cleansed)) +
+  geom_text(stat = "count", aes(label = ..count.., y = ..count.., vjust = -0.2)) +
+  labs(x = "Zipcode", y = "Total Listing", fill='Neighbourhood') + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_y_continuous(breaks = seq(0, 150, 25))
+
+multiplot(p7, p8)
+```
+
+***
+
+**Final Recommendations**
+
+**The final zipcodes recommended are based on how quickly the client can recover the invested money and start earning profit i.e. zipcodes with lower median breakeven time.**
+
+*Note: Zipcodes with 2 or lower properties are not considered*
+
+```{r}
+zipcode_recommended <- 
+  house_rent_and_buy_price %>% 
+  group_by(zipcode, neighbourhood_group_cleansed) %>% 
+  summarize(median_breakeven_time = median(breakeven_time),
+            count = n()) %>% 
+  filter(count > 2) %>% 
+  select(-count) %>% 
+  arrange(median_breakeven_time) %>% 
+  mutate(rank = row_number(), median_breakeven_time = round(median_breakeven_time, 2)) %>% 
+  select(rank, zipcode, neighbourhood = neighbourhood_group_cleansed, median_breakeven_time)
+
+zipcode_recommended$rank <- 1:nrow(zipcode_recommended)
+
+datatable(zipcode_recommended)
+```
+
+***
+
+**Future Analysis**
+
+* Weigh the revenue generated from each property (after reaching the breakeven point) for providing final recommendations.
+* Weigh the review score of each property for providing final recommendations.
+* Perform text analytics to understand the sentiment of each review.
+* Analyze the impact of amenities on the square feet area.
+* Run the same analysis on properties with 1 bhk, 3 bhk, 4 bhk etc. 
